@@ -69,7 +69,7 @@ def detect_reactions_and_create_bonds(
     activation_energy_ea: float,
     arrhenius_prefactor_a: float,
     temperature: float,
-    max_bonds_per_atom: int = 4,
+    max_bonds_per_atom: int = 6,  # Increased to allow more complex molecules
 ) -> int:
     """
     Detect reactions and create bonds using Arrhenius kinetics.
@@ -238,7 +238,7 @@ def run_lammps_simulation_gpu_optimized(
     lmp.command("neigh_modify delay 0 every 1 check yes")
     lmp.command(f"region box block 0 {width} 1.1 {height} -0.5 0.5")
     lmp.command(
-        "create_box 2 box bond/types 1 extra/bond/per/atom 4 extra/special/per/atom 8"
+        "create_box 2 box bond/types 1 extra/bond/per/atom 8 extra/special/per/atom 16"
     )
     
     lmp.command("mass 1 1.0")
