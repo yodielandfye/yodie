@@ -26,6 +26,43 @@ except ImportError:
         WORLD = {"WIDTH": 500, "HEIGHT": 1000}
 
 
+class SpatialHashGrid:
+    """
+    Spatial hashing for efficient neighbor finding.
+    This is a computational optimization - physics remains identical.
+    """
+    def __init__(self, cell_size: float):
+        self.cell_size = cell_size
+        self.grid: dict = {}
+    
+    def _get_key(self, pos: np.ndarray) -> tuple:
+        """Get grid cell key for position."""
+        return (int(pos[0] / self.cell_size), int(pos[1] / self.cell_size))
+    
+    def clear(self):
+        """Clear the grid."""
+        self.grid.clear()
+    
+    def insert(self, idx: int, pos: np.ndarray):
+        """Insert atom at position."""
+        key = self._get_key(pos)
+        if key not in self.grid:
+            self.grid[key] = []
+        self.grid[key].append(idx)
+    
+    def query(self, pos: np.ndarray, radius: float) -> list:
+        """Get all atoms within radius of position."""
+        neighbors = []
+        # Check current cell and 8 surrounding cells
+        center_key = self._get_key(pos)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (center_key[0] + dx, center_key[1] + dy)
+                if key in self.grid:
+                    neighbors.extend(self.grid[key])
+        return neighbors
+
+
 def detect_reactions_and_create_bonds(
     lmp,
     reaction_radius: float,
@@ -79,23 +116,43 @@ def detect_reactions_and_create_bonds(
     except:
         pass
     
-    # Detect potential reactions
+    # Build spatial hash grid for efficient neighbor finding
+    # Cell size should be slightly larger than reaction radius
+    grid = SpatialHashGrid(cell_size=reaction_radius * 1.5)
+    grid.clear()
+    for i in range(natoms):
+        grid.insert(i, positions[i])
+    
+    # Detect potential reactions using spatial hashing
     bonds_to_create = []
     kT = temperature  # Reduced temperature units
+    checked_pairs = set()  # Avoid checking same pair twice
     
     for i in range(natoms):
         if bond_counts[i] >= max_bonds_per_atom:
             continue  # Atom already has max bonds
         
-        for j in range(i + 1, natoms):
+        # Get nearby neighbors from spatial grid
+        nearby_indices = grid.query(positions[i], reaction_radius)
+        
+        for j in nearby_indices:
+            if i >= j:  # Only check each pair once
+                continue
+            
             if bond_counts[j] >= max_bonds_per_atom:
                 continue  # Neighbor already has max bonds
+            
+            # Avoid duplicate checks
+            pair_key = (i, j)
+            if pair_key in checked_pairs:
+                continue
+            checked_pairs.add(pair_key)
             
             # Check if already bonded
             if (i, j) in existing_bonds or (j, i) in existing_bonds:
                 continue
             
-            # Check distance
+            # Check distance (double-check since grid is approximate)
             dr = positions[j] - positions[i]
             distance = np.linalg.norm(dr)
             
@@ -297,3 +354,4 @@ if __name__ == "__main__":
         activation_energy_ea=1.5,
         temperature=1.8,
     )
+
