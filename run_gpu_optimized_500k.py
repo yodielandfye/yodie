@@ -1,13 +1,14 @@
 """
 Run GPU-optimized 500k step simulation.
+Uses scipy KDTree + vectorized operations for maximum GPU utilization.
 """
 
 from main_gpu_world_emergent_gpu_opt import run_lammps_simulation_gpu_optimized
 
 print("🚀 GPU-OPTIMIZED BIOLOGY TEST - 500k Steps")
 print("Parameters: 200k particles, 500k steps, T=1.8, Ea=1.5")
-print("⚡ Full GPU acceleration with LAMMPS neighbor lists")
-print("⚡ CPU sync every 10k steps (minimal overhead)")
+print("⚡ Vectorized Arrhenius + scipy KDTree + 200k intervals")
+print("⚡ CPU sync every 200k steps (minimal overhead)")
 print("🚀 Starting simulation...")
 
 run_lammps_simulation_gpu_optimized(
@@ -16,8 +17,7 @@ run_lammps_simulation_gpu_optimized(
     reaction_radius=1.5,
     activation_energy_ea=1.5,
     temperature=1.8,
-    reaction_check_interval=10_000,  # Check every 10k steps (10x less frequent = more GPU time)
+    reaction_check_interval=200_000,  # Check every 200k steps (20x less frequent!)
 )
 
 print("✅ Simulation complete!")
-
