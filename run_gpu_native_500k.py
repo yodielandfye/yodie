@@ -1,4 +1,20 @@
 """
+Helper entrypoint that wires the GPU-native emergent substrate into a single
+command.  Use this when you want to schedule a long run without editing the
+main module.
+"""
+
+from main_gpu_world_emergent_gpu_native import (
+    EmergentConfig,
+    run_lammps_simulation_gpu_native,
+)
+
+
+if __name__ == "__main__":
+    cfg = EmergentConfig()
+    run_lammps_simulation_gpu_native(cfg)
+
+"""
 Run GPU-native 500k step simulation.
 Uses LAMMPS compute commands for maximum GPU utilization.
 """
