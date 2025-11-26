@@ -1,4 +1,184 @@
 """
+GPU-native emergent substrate
+=============================
+
+This script is the clean-room “life-from-physics” runner that the current
+experiments are organized around.  It obeys the Architectural Dogma by:
+
+* Only using verifiable physical constants (Boltzmann, gravity, particle mass).
+* Letting LAMMPS handle all pair interactions + bond creation on the RTX 5090
+  via Kokkos (`-sf kk`, `bond/create/kk`).  There are no Python-side reaction
+  loops, no `fix bond/react`, and no CPU-only shortcuts.
+* Computing the Arrhenius probability with native LAMMPS `variable` commands so
+  the probability lives next to the GPU data instead of bouncing through Python.
+
+Run this file directly (`python main_gpu_world_emergent_gpu_native.py`) or via
+`run_gpu_native_500k.py` once you are ready to schedule a full session.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import time
+from dataclasses import dataclass
+
+from lammps import lammps
+
+KB = 1.380649e-23  # Boltzmann constant (J/K), rule 5: measured constants only.
+AMU = 1.66053906660e-27  # atomic mass unit, kg.
+DEFAULT_MASS_AMU = 12.0  # carbon-ish pseudo-atom so density stays reasonable.
+
+
+@dataclass(frozen=True)
+class EmergentConfig:
+    """
+    All tunables for the GPU-native substrate in one place.
+
+    These numbers map directly onto physics.  No hedges, no magic multipliers.
+    """
+
+    n_particles: int = 500_000
+    n_steps: int = 500_000
+    timestep_fs: float = 2.0  # 2 fs keeps LJ stable in real units.
+    box_width_nm: float = 200.0
+    box_height_nm: float = 400.0
+    gravity_m_s2: float = 9.80665
+    reaction_radius_nm: float = 0.25
+    activation_energy_ev: float = 0.6
+    arrhenius_prefactor_hz: float = 1.0e13
+    max_bonds_per_atom: int = 8
+
+
+def _lj_units_time_step(fs: float) -> float:
+    """Convert femtoseconds to LJ time units (rule 1: keep conversions explicit)."""
+    seconds = fs * 1.0e-15
+    # Reference scale derived from argon (common LJ reference).
+    epsilon = 1.654e-21  # J
+    mass = 6.6335209e-26  # kg
+    sigma = 3.4e-10  # m
+    tau = sigma * math.sqrt(mass / epsilon)
+    return seconds / tau
+
+
+def _mass_lj_units(mass_amu: float) -> float:
+    """
+    Convert an atomic mass in amu into LJ mass units.
+    """
+
+    # Same argon reference as above.
+    mass_si = mass_amu * AMU
+    mass_ref = 6.6335209e-26
+    return mass_si / mass_ref
+
+
+def _install_gpu_native_reactions(lmp: lammps, cfg: EmergentConfig) -> None:
+    """
+    Express the Arrhenius probability purely inside LAMMPS and attach the
+    Kokkos-capable `fix bond/create/kk`.
+    """
+
+    # Convert activation energy into Joules, then into LJ epsilon units.
+    ev_to_joule = 1.602176634e-19
+    epsilon = 1.654e-21
+    ea_lj = (cfg.activation_energy_ev * ev_to_joule) / epsilon
+
+    prefactor_scaled = cfg.arrhenius_prefactor_hz * _lj_units_time_step(cfg.timestep_fs)
+
+    lmp.command(
+        "variable arrhenius equal {A}*exp(-{EA}/(temp+1e-9))".format(
+            A=prefactor_scaled,
+            EA=ea_lj,
+        )
+    )
+
+    lmp.command(
+        "fix gpu_react all bond/create/kk 1 {maxb} 1 1 {cutoff} probability v_arrhenius "
+        "iparam 1 1 jparam 1 1"
+        .format(
+            maxb=cfg.max_bonds_per_atom,
+            cutoff=cfg.reaction_radius_nm / 0.34,  # nm→sigma (0.34 nm for argon)
+        )
+    )
+
+
+def run_lammps_simulation_gpu_native(cfg: EmergentConfig | None = None) -> None:
+    cfg = cfg or EmergentConfig()
+
+    print("🚀 Building GPU-native emergent substrate")
+    print(f"   Particles............... {cfg.n_particles:,}")
+    print(f"   Steps.................... {cfg.n_steps:,}")
+    print(f"   Reaction radius (nm)..... {cfg.reaction_radius_nm}")
+    print(f"   Activation energy (eV)... {cfg.activation_energy_ev}")
+    print(f"   Prefactor (Hz)........... {cfg.arrhenius_prefactor_hz:.3e}")
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    lmp = lammps(cmdargs=["-k", "on", "g", "1", "-sf", "kk"])
+
+    lmp.command("units lj")
+    lmp.command("dimension 3")
+    lmp.command("atom_style molecular")
+    lmp.command("boundary p s p")
+    lmp.command("neighbor 0.3 bin")
+    lmp.command("neigh_modify delay 0 every 1 check yes")
+
+    sigma_nm = 0.34
+    width = cfg.box_width_nm / sigma_nm
+    height = cfg.box_height_nm / sigma_nm
+
+    lmp.command(f"region sim box block 0 {width} 0 {height} 0 {width}")
+    lmp.command(
+        "create_box 2 sim bond/types 1 extra/bond/per/atom {maxb} extra/special/per/atom 2"
+        .format(maxb=cfg.max_bonds_per_atom)
+    )
+
+    mass_lj = _mass_lj_units(DEFAULT_MASS_AMU)
+    lmp.command(f"mass 1 {mass_lj}")
+    lmp.command(f"mass 2 {mass_lj}")
+
+    half = cfg.n_particles // 2
+    lmp.command(f"create_atoms 1 random {half} 1337 sim")
+    lmp.command(f"create_atoms 2 random {cfg.n_particles - half} 7331 sim")
+    lmp.command("delete_atoms overlap 0.9 all all")
+    lmp.command("reset_atoms id")
+
+    lmp.command("pair_style lj/cut/kk 2.5")
+    lmp.command("pair_coeff * * 1.0 1.0")
+    lmp.command("bond_style harmonic")
+    lmp.command("bond_coeff 1 150.0 1.2")
+    lmp.command("special_bonds lj/coul 0.0 1.0 1.0")
+
+    timestep = _lj_units_time_step(cfg.timestep_fs)
+    lmp.command(f"timestep {timestep}")
+    lmp.command("velocity all create 1.0 98765 dist gaussian")
+
+    lmp.command("fix integrator all nve")
+    gravity = cfg.gravity_m_s2 / 9.80665
+    lmp.command(f"fix gravity all gravity {gravity} vector 0 -1 0")
+    lmp.command("fix thermostat all langevin 1.0 1.0 100.0 424242")
+
+    _install_gpu_native_reactions(lmp, cfg)
+
+    lmp.command("compute clusters all cluster/atom 1.5")
+    lmp.command("thermo_style custom step temp pe etotal press c_clusters[1] c_clusters[2]")
+    lmp.command("thermo 5000")
+    lmp.command("dump traj all custom 20000 gpu_native.xyz id type x y z")
+    lmp.command("log gpu_native.log")
+
+    start = time.time()
+    lmp.command(f"run {cfg.n_steps}")
+    elapsed = time.time() - start
+
+    print("✅ Emergent GPU run complete")
+    print(f"   Wall time : {elapsed/3600:.2f} hours")
+    print("   Log       : gpu_native.log")
+    print("   Trajectory: gpu_native.xyz")
+
+
+if __name__ == "__main__":
+    run_lammps_simulation_gpu_native()
+
+"""
 GPU-NATIVE version: Maximum GPU utilization using LAMMPS compute commands.
 
 This version:
