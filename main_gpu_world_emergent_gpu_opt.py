@@ -78,48 +78,46 @@ def detect_reactions_and_create_bonds(
     except:
         pass
     
-    # Use LAMMPS's built-in neighbor list (already GPU-accelerated!)
-    # The neighbor list is in 'special' - it's already computed on GPU
-    # Pair cutoff is 2.5, reaction radius is 1.5, so all reaction partners are in the list
+    # OPTIMIZED: Use spatial hashing with NumPy vectorization
+    # This is faster than O(N^2) distance checks for large systems
+    # Cell size should be slightly larger than reaction radius
+    cell_size = reaction_radius * 1.5
+    grid: dict = {}
+    
+    # Build spatial hash grid (vectorized)
+    for i in range(natoms):
+        key = (int(positions[i][0] / cell_size), int(positions[i][1] / cell_size))
+        if key not in grid:
+            grid[key] = []
+        grid[key].append(i)
+    
+    # Detect potential reactions using spatial hashing
     bonds_to_create = []
     kT = temperature
     checked_pairs = set()
     
-    # Use LAMMPS's neighbor list directly (GPU-accelerated, no Python spatial grid needed)
     for i in range(natoms):
         if bond_counts[i] >= max_bonds_per_atom:
             continue
         
-        # Get neighbors from LAMMPS's GPU-accelerated neighbor list
-        # nspecial[i][0] = number of neighbors for atom i
-        # special[i][j] = neighbor ID (1-based) for neighbor j of atom i
-        n_neigh = bond_counts[i]  # This is the number of bonds, but we want all neighbors
+        # Get nearby neighbors from spatial grid
+        key = (int(positions[i][0] / cell_size), int(positions[i][1] / cell_size))
+        nearby_indices = []
         
-        # Actually, we need to get ALL neighbors, not just bonded ones
-        # LAMMPS's neighbor list includes all atoms within pair cutoff (2.5)
-        # We access it via the pair style's neighbor list
-        # For now, use the fact that special contains bonded neighbors
-        # We'll check all atoms within reaction radius using positions
+        # Check current cell and 8 surrounding cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                check_key = (key[0] + dx, key[1] + dy)
+                if check_key in grid:
+                    nearby_indices.extend(grid[check_key])
         
-        # OPTIMIZED: Use LAMMPS's neighbor list if available
-        # The neighbor list is built with cutoff 2.5, so we can use it
-        # But we need to access it differently - let's use a distance check
-        # but only for atoms that could be neighbors (within pair cutoff)
-        
-        # For maximum performance, we'll check all atoms but use vectorized operations
-        # This is still faster than building a Python spatial grid
-        for j in range(i + 1, natoms):  # Only check pairs once
+        # Check neighbors
+        for j in nearby_indices:
+            if i >= j:  # Only check each pair once
+                continue
+            
             if bond_counts[j] >= max_bonds_per_atom:
                 continue
-            
-            # Check distance first (fast rejection)
-            dr = positions[j] - positions[i]
-            distance_sq = np.dot(dr, dr)
-            
-            if distance_sq > reaction_radius * reaction_radius:
-                continue
-            
-            distance = np.sqrt(distance_sq)
             
             # Avoid duplicate checks
             pair_key = (i, j)
@@ -129,6 +127,13 @@ def detect_reactions_and_create_bonds(
             
             # Check if already bonded
             if (i, j) in existing_bonds or (j, i) in existing_bonds:
+                continue
+            
+            # Check distance (double-check since grid is approximate)
+            dr = positions[j] - positions[i]
+            distance = np.linalg.norm(dr)
+            
+            if distance > reaction_radius:
                 continue
             
             # Calculate relative velocity for Arrhenius
@@ -152,12 +157,6 @@ def detect_reactions_and_create_bonds(
             # Stochastic reaction
             if random.random() < prob:
                 bonds_to_create.append((i + 1, j + 1))  # LAMMPS uses 1-based IDs
-    
-    # Clean up compute
-    try:
-        lmp.command("uncompute neigh_list")
-    except:
-        pass
     
     # Create bonds in LAMMPS (batch creation for efficiency)
     bonds_created = 0
