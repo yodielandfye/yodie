@@ -200,13 +200,13 @@ def detect_reactions_and_create_bonds(
 
 
 def run_lammps_simulation_gpu_optimized(
-    n_particles: int = 50_000,
+    n_particles: int = 200_000,  # Increased for better GPU utilization
     n_steps: int = 500_000,
     reaction_radius: float = 1.5,
     activation_energy_ea: float = 1.5,
     arrhenius_prefactor_a: float = 1.0e10,
     temperature: float = 1.8,
-    reaction_check_interval: int = 100,  # Check for reactions every N steps
+    reaction_check_interval: int = 1000,  # Check less frequently for better GPU usage
 ) -> None:
     """
     GPU-optimized simulation: Full GPU for forces, periodic CPU for bond creation.
@@ -348,10 +348,11 @@ def run_lammps_simulation_gpu_optimized(
 
 if __name__ == "__main__":
     run_lammps_simulation_gpu_optimized(
-        n_particles=50_000,
+        n_particles=200_000,  # 4x more atoms for better GPU utilization
         n_steps=500_000,
         reaction_radius=1.5,
         activation_energy_ea=1.5,
         temperature=1.8,
+        reaction_check_interval=1000,  # Check every 1000 steps (less CPU overhead)
     )
 
